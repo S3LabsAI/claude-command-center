@@ -328,8 +328,12 @@ async function refreshAgents($: EngineInterface) {
   }))
   await update($, agents, prior => (stable(prior) === stable(cards) ? prior : cards))
   // The first sighting of an agent: when it was seen, and what its Agent call asked.
-  if (cards.length > 0)
+  if (cards.length > 0) {
+    // `update` runs this again when another write lands first, so it only reads the
+    // briefs; the ones the written run used are dropped once the write is in.
+    let used: string[] = []
     await update($, activity, all => {
+      used = []
       let changed = false
       const next = { ...all }
       for (const c of cards) {
@@ -337,11 +341,13 @@ async function refreshAgents($: EngineInterface) {
         const brief = prior.prompt === undefined ? briefs.get(c.description) : undefined
         if (prior.firstSeen !== undefined && brief === undefined) continue
         next[c.id] = { ...prior, firstSeen: prior.firstSeen ?? Date.now(), ...(brief ?? {}) }
-        if (brief) briefs.delete(c.description)
+        if (brief) used.push(c.description)
         changed = true
       }
       return changed ? next : all
     })
+    for (const description of used) briefs.delete(description)
+  }
 }
 
 function agentCallMark(status: 'runs' | 'ok' | 'error'): string {
@@ -868,7 +874,7 @@ export const register: Register = on => {
     const ran = await next(e)
     void refreshSkins($)
     return ran
-  })
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
     const key = callKey(e.tool, e)
@@ -878,7 +884,8 @@ export const register: Register = on => {
         prompt: e.prompt,
         model: e.model,
         effort: e.effort,
-        isBackground: e.run_in_background === true,
+        // Builds before 2.1.325 say it in the call; later ones settle it at the spawn.
+        isBackground: (e as { run_in_background?: unknown }).run_in_background === true,
       })
     const agentId = e.agentId
     const label = describe(e.tool, e)
@@ -953,6 +960,22 @@ export const register: Register = on => {
     }
     return step
   })
+
+  // Whether an agent runs in the background is settled as it spawns: kept on its brief
+  // until its card is listed, and on its card once it is.
+  on('agent.spawn', async ($, e, next) => {
+    const brief = briefs.get(e.description)
+    if (brief) briefs.set(e.description, { ...brief, isBackground: e.background })
+    const ran = await next(e)
+    const agentId = ran.deny === undefined ? ran.agentId : undefined
+    if (agentId)
+      await update($, activity, all => {
+        const prior = all[agentId]
+        return prior && prior.isBackground !== e.background ? { ...all, [agentId]: { ...prior, isBackground: e.background } } : all
+      })
+    return ran
+    // It only watches: should it throw, the spawn goes on (replayed, not run twice).
+  }).catch(($, e, next) => next(e))
 
   // Subagents come and go: refresh their cards at once rather than on the next tick.
   on('classic.SubagentStart', async ($, e, next) => {

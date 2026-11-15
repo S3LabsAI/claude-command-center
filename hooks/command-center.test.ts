@@ -814,3 +814,22 @@ test('the Skins card takes the Shortcuts card place and minimized state from a s
   expect(await ui.find({ type: 'Button', key: 'skin:noir' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('an agent the spawn puts in the background says so in its details', async ($, on) => {
+  const list: AgentInfo[] = [{ id: 'a7', type: 'general-purpose', description: 'Review the diff', status: 'running' }]
+  on('agent.list', async () => ({ value: list }))
+  on('tool.call', async () => ({ result: { ok: true } as never, text: 'ok' }))
+  on('agent.spawn', async () => ({ model: 'claude-sonnet-5-5', agentId: 'a7' }))
+  on('classic.SubagentStart', async () => ({}))
+  const { call } = $.tool as never as { call: (args: object) => Promise<unknown> }
+
+  // The Agent call no longer says it runs in the background; the spawn does.
+  await call({ tool: 'Agent', description: 'Review the diff', prompt: 'Review the staged diff for bugs.' })
+  await $.agent.spawn({ prompt: 'Review the staged diff for bugs.', description: 'Review the diff', background: true } as never)
+  await $.classic.SubagentStart({ agent_id: 'a7', agent_type: 'general-purpose' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'agent-more:a7' })
+  expect(await ui.find({ type: 'Text', text: /· background/ })).toBeDefined()
+  await ui.unmount()
+})
