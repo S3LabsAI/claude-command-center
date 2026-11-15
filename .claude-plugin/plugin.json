@@ -1,6 +1,6 @@
 {
   "name": "command-center",
-  "version": "0.4.0",
-  "description": "Command Center: a live pane with context and plan limits, background work, subagent details, side questions, approvals and quick actions",
+  "version": "0.5.0",
+  "description": "Command Center: a live pane with context and plan limits, background work, subagent details, side questions, approvals, quick actions and a skin switcher",
   "types": "./types/index.d.ts"
 }

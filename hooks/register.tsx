@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, RenderChildren, ToolCallResult, SessionContextUsage, SessionRateLimit, ToolCallInput } from 'claude-code'
 
-import type { AgentCard, AgentDetail, AppState, Approval, BackgroundJob, CallStats, PlanStep, Shortcut, SideQuestion, Usage } from '../types'
+import type { AgentCard, AgentDetail, AppState, Approval, BackgroundJob, CallStats, PlanStep, SideQuestion, SkinsInfo, Usage } from '../types'
 
 const PANE = 'command-center'
 const TITLE = 'Command Center'
@@ -14,29 +14,42 @@ const activity = atom({ plugin: 'command-center', key: 'activity' } as const, {}
 const expanded = atom({ plugin: 'command-center', key: 'expanded' } as const, {})
 const approvals = atom({ plugin: 'command-center', key: 'approvals' } as const, [])
 const session = atom({ plugin: 'command-center', key: 'session' } as const, { isWorking: false, isCompacting: false, tick: 0 })
-const shortcuts = atom({ plugin: 'command-center', key: 'shortcuts' } as const, [])
+const skins = atom({ plugin: 'command-center', key: 'skins' } as const, { isAvailable: false, builtIn: [], made: [], accents: {} })
 const plan = atom({ plugin: 'command-center', key: 'plan' } as const, { steps: [] })
 const collapsed = atom({ plugin: 'command-center', key: 'collapsed' } as const, {})
 const layout = atom({ plugin: 'command-center', key: 'layout' } as const, { order: [], isArranging: false })
 
 // The movable cards, top to bottom by default. Approvals is not among them: it always
 // sits at the top while something waits.
-const CARD_ORDER = ['plan', 'actions', 'context', 'side', 'shortcuts', 'background', 'agents', 'activity'] as const
+const CARD_ORDER = ['plan', 'actions', 'context', 'side', 'skins', 'background', 'agents', 'activity'] as const
 const app = atom({ plugin: 'command-center', key: 'app' } as const, { isAvailable: false, groups: [], isConfirmingArchive: false, isNamingGroup: false })
 const calls = atom({ plugin: 'command-center', key: 'calls' } as const, { total: 0, failed: 0, byTool: {}, recent: [], failures: [] })
 
-// The commands the Shortcuts card offers, by the name typed after the slash (any
-// plugin prefix is found at load). The extras show when the pane is wide enough.
-const SHORTCUTS: readonly { name: string; label: string; isExtra?: true }[] = [
-  { name: 'market-research-reports', label: 'Market research' },
-  { name: 'goal-client-report', label: 'Client report' },
-  { name: 'prompt-engineering-expert', label: 'Prompt expert' },
-  { name: 'goal-initial-onboarding', label: 'Onboarding' },
-  { name: 'design-taste-frontend', label: 'Design taste', isExtra: true },
-  { name: 'disposition-import', label: 'Dispositions', isExtra: true },
-  { name: 'research-company', label: 'Research company', isExtra: true },
-]
-const EXTRAS_MIN_COLUMNS = 48
+// The skins mod's design tool: the one its skin-designer skill calls to show, make and
+// apply skins. The Skins card calls it the same way.
+const SKIN_TOOL = 'mcp__skins__design'
+const SKIN_DESIGNER = 'skin-designer'
+
+// The built-in skins' names as the skins mod labels them, and each one's accent (its
+// `user` slot). Noir and Mono are white on dark, so their dot takes the text colour.
+const SKIN_LABEL: Record<string, string> = {
+  noir: 'Noir',
+  'tokyo-night': 'Tokyo Night',
+  dracula: 'Dracula',
+  nord: 'Nord',
+  gruvbox: 'Gruvbox',
+  catppuccin: 'Catppuccin',
+  mono: 'Mono',
+}
+const SKIN_ACCENT: Record<string, string | undefined> = {
+  noir: undefined,
+  'tokyo-night': '#7aa2f7',
+  dracula: '#bd93f9',
+  nord: '#88c0d0',
+  gruvbox: '#fabd2f',
+  catppuccin: '#cba6f7',
+  mono: undefined,
+}
 
 const MODELS = [
   { value: 'opus', label: 'Opus 5.5' },
@@ -335,18 +348,73 @@ function agentCallMark(status: 'runs' | 'ok' | 'error'): string {
   return status === 'runs' ? '…' : status === 'ok' ? '✓' : '✗'
 }
 
-// Which of the session's commands each shortcut runs: the exact name, else one a
-// plugin or your own skills prefix (`anthropic-skills:research-company`), yours first.
-async function resolveShortcuts($: EngineInterface) {
-  const listed = await $.command.list()
-  const found: Shortcut[] = []
-  for (const s of SHORTCUTS) {
-    const matches = listed.filter(c => c.name === s.name || c.name.endsWith(`:${s.name}`))
-    const pick =
-      matches.find(c => c.name === s.name) ?? matches.find(c => c.source === 'user') ?? matches[0]
-    if (pick) found.push({ label: s.label, command: pick.name, isExtra: s.isExtra === true })
+// ---- skins, through the skins mod's design tool ----
+
+// Calls the design tool and returns its text. `pressed` is the press that asked for it,
+// passed on as the person's words. Throws with the mod's refusal.
+async function design($: EngineInterface, args: Record<string, unknown>, pressed?: string): Promise<string> {
+  const consent = pressed === undefined ? {} : { consent: `The user pressed "${pressed}" in the Command Center pane.` }
+  const result = await ($.tool.call as unknown as (input: object) => Promise<ToolCallResult<string>>)({
+    tool: SKIN_TOOL,
+    ...args,
+    ...consent,
+  })
+  if (result.deny !== undefined) throw new Error(result.deny)
+  const text = typeof result.result === 'string' ? result.result : (result.text ?? '')
+  if (result.isError) throw new Error(text || 'The skins mod refused that')
+  return text
+}
+
+function names(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((n): n is string => typeof n === 'string') : []
+}
+
+// Reads the skin in use and every skin there is, as `{"action":"show"}` reports them.
+// No skins mod in the session (or no answer) hides the card.
+async function refreshSkins($: EngineInterface) {
+  try {
+    const shown = JSON.parse(await design($, { action: 'show' })) as Record<string, unknown>
+    if (!Array.isArray(shown.builtIn)) throw new Error('show did not list the skins')
+    const current = typeof shown.current === 'string' ? shown.current : undefined
+    const palette = (shown.palette ?? {}) as Record<string, unknown>
+    const accent = typeof palette.user === 'string' ? palette.user : undefined
+    await update($, skins, s => {
+      const next: SkinsInfo = {
+        ...s,
+        isAvailable: true,
+        current,
+        builtIn: names(shown.builtIn),
+        made: names(shown.made),
+        accents: current && accent && !(current in SKIN_ACCENT) ? { ...s.accents, [current]: accent } : s.accents,
+      }
+      return stable(next) === stable(s) ? s : next
+    })
+  } catch {
+    await update($, skins, s => (s.isAvailable ? { ...s, isAvailable: false } : s))
   }
-  await update($, shortcuts, () => found)
+}
+
+// The skin-designer skill's command, prefixed by its plugin (`skins:skin-designer`).
+async function resolveDesigner($: EngineInterface) {
+  const listed = await $.command.list()
+  const pick = listed.find(c => c.name === SKIN_DESIGNER) ?? listed.find(c => c.name.endsWith(`:${SKIN_DESIGNER}`))
+  await update($, skins, s => (s.designer === pick?.name ? s : { ...s, designer: pick?.name }))
+}
+
+function skinLabel(name: string): string {
+  return SKIN_LABEL[name] ?? name.split('-').map(w => (w === '' ? w : `${w[0]!.toUpperCase()}${w.slice(1)}`)).join(' ')
+}
+
+// Applies a skin from a press, in a dispatch of its own: shown at once, then read back.
+function applySkin($: EngineInterface, name: string) {
+  const label = skinLabel(name)
+  void update($, skins, s => ({ ...s, current: name }))
+  $.clock.after(1, () =>
+    void design($, { action: 'apply', name }, `Switch the skin to ${label}`)
+      .then(() => $.ui.toast(`Skin: ${label}`))
+      .catch((error: unknown) => $.ui.toast(error instanceof Error ? error.message : String(error)))
+      .finally(() => void refreshSkins($)),
+  )
 }
 
 async function refreshSession($: EngineInterface) {
@@ -387,7 +455,7 @@ function runCommand($: EngineInterface, command: string, args: string, done?: (t
 // except one whose default place is the top: that goes first.
 function orderOf(saved: readonly string[]): string[] {
   const known = saved
-    .map(id => (id === 'tasks' ? 'background' : id))
+    .map(id => (id === 'tasks' ? 'background' : id === 'shortcuts' ? 'skins' : id))
     .filter(id => (CARD_ORDER as readonly string[]).includes(id))
   const top = known.includes(CARD_ORDER[0]) ? [] : [CARD_ORDER[0]]
   return [...new Set([...top, ...known, ...CARD_ORDER])]
@@ -736,9 +804,18 @@ export const register: Register = on => {
     await update($, usage, () => toUsage(now.context, now.rateLimits))
     await update($, session, s => ({ ...s, startedAt: now.startedAt, costUsd: now.cost?.usd }))
     await refreshSession($).catch(() => undefined)
-    await resolveShortcuts($).catch(() => undefined)
+    await resolveDesigner($).catch(() => undefined)
+    // The skins mod registers its tool as its own session starts: read it once this
+    // start is done, and again a little later in case it was not yet there.
+    $.clock.after(1, () => void refreshSkins($))
+    $.clock.after(5000, () => void refreshSkins($))
     const saved = await $.store.get('collapsed').catch(() => undefined)
-    if (saved && typeof saved === 'object') await update($, collapsed, () => saved as Record<string, boolean>)
+    if (saved && typeof saved === 'object') {
+      // The Skins card took the Shortcuts card's place: it keeps that card's minimized state.
+      const { shortcuts: wasShortcuts, ...rest } = saved as Record<string, boolean>
+      const folded = wasShortcuts !== undefined && rest.skins === undefined ? { ...rest, skins: wasShortcuts } : rest
+      await update($, collapsed, () => folded)
+    }
     const savedOrder = await $.store.get('order').catch(() => undefined)
     if (Array.isArray(savedOrder)) await update($, layout, l => ({ ...l, order: orderOf(savedOrder.map(String)) }))
     $.clock.every(3000, () => void refreshAgents($).catch(() => undefined))
@@ -781,6 +858,15 @@ export const register: Register = on => {
     const ran = await next(e)
     await update($, session, s => ({ ...s, isWorking: false }))
     void refreshSession($).catch(() => undefined)
+    // Picks up a skin changed in the skins mod's own settings pane.
+    void refreshSkins($)
+    return ran
+  })
+
+  // `/skin <name>`, `/skin off` and the rest: show the change in the Skins card at once.
+  on('command.run', { command: 'skin' }, async ($, e, next) => {
+    const ran = await next(e)
+    void refreshSkins($)
     return ran
   })
 
@@ -836,6 +922,8 @@ export const register: Register = on => {
       await update($, plan, p => ({ steps: applyPlan(p.steps, e.tool, input, at), updatedAt: at }))
     }
     if (e.tool === 'Agent' || e.agentId) void refreshAgents($).catch(() => undefined)
+    // Claude used the skin-designer skill: show the skin it made or applied.
+    if (e.tool === SKIN_TOOL && ran.deny === undefined) void refreshSkins($)
     return ran
   })
 
@@ -943,19 +1031,19 @@ export const register: Register = on => {
     const opened = await read($, expanded)
     const pending = await read($, approvals)
     const sess = await read($, session)
-    const shortcutList = await read($, shortcuts)
+    const skinState = await read($, skins)
     const planNow = await read($, plan)
     const stats = await read($, calls)
     const folded = await read($, collapsed)
     const appState = await read($, app)
     const lay = await read($, layout)
     const order = orderOf(lay.order)
-    // The cards drawn this time, in order (Actions is absent in a terminal, Shortcuts
-    // when none resolved); the arrows move a card past its drawn neighbours only.
+    // The cards drawn this time, in order (Actions is absent in a terminal, Skins
+    // without the skins mod); the arrows move a card past its drawn neighbours only.
     const isShown: Record<string, boolean> = {
       plan: planNow.steps.length > 0,
       actions: appState.isAvailable,
-      shortcuts: shortcutList.length > 0,
+      skins: skinState.isAvailable,
       side: Input !== undefined || asked.length > 0,
     }
     const shownOrder = () => order.filter(id => isShown[id] !== false)
@@ -1345,29 +1433,66 @@ export const register: Register = on => {
       </Box>,
     )
 
-    const roomy = (e.props.bodyColumns ?? e.viewport?.columns ?? 0) >= EXTRAS_MIN_COLUMNS
-    const shown = shortcutList.filter(sc => roomy || !sc.isExtra)
-    const shortcutsCard =
-      shown.length > 0 &&
+    // One button per skin, built-in first and then your own; the one in use is the
+    // primary button. Off and Settings go through /skin, Design through the skill.
+    const skinNames = [...new Set([...skinState.builtIn, ...skinState.made])]
+    const isSkinOff = skinState.current === 'off'
+    const designPrompt = skinState.designer ? `/${skinState.designer} ` : 'Design me a new skin that feels like '
+    const skinsCard =
+      skinState.isAvailable &&
       card(
-        'card:shortcuts',
-        'Shortcuts',
-        '',
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
-          {shown.map(sc => (
+        'card:skins',
+        'Skins',
+        isSkinOff ? 'off' : skinState.current ? skinLabel(skinState.current) : '',
+        <Box flexDirection="column" gap={1}>
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {skinNames.map(name => {
+              const isCurrent = name === skinState.current
+              const accent = name in SKIN_ACCENT ? SKIN_ACCENT[name] : skinState.accents[name]
+              return (
+                <Button
+                  key={`skin:${name}`}
+                  label={skinLabel(name)}
+                  variant={isCurrent ? 'primary' : 'secondary'}
+                  onPress={() => (isCurrent ? undefined : applySkin($, name))}
+                >
+                  <Text color={accent}>{isCurrent ? '●' : '○'}</Text> {skinLabel(name)}
+                </Button>
+              )
+            })}
+          </Box>
+          <Box flexDirection="row" flexWrap="wrap" gap={1} alignItems="center">
             <Button
-              key={`shortcut:${sc.command}`}
+              key="skin-design"
               variant="secondary"
               onPress={() =>
                 void $.prompt
-                  .fill({ text: `/${sc.command} `, mode: 'replace' })
-                  .then(r => (r.isFilled ? undefined : $.ui.toast(`Type /${sc.command} in the message box`)))
-                  .catch(() => $.ui.toast(`Type /${sc.command} in the message box`))
+                  .fill({ text: designPrompt, mode: 'replace' })
+                  .then(r => (r.isFilled ? undefined : $.ui.toast(`Type ${designPrompt.trim()} in the message box`)))
+                  .catch(() => $.ui.toast(`Type ${designPrompt.trim()} in the message box`))
               }
             >
-              {sc.label}
+              ✨ Design a skin
             </Button>
-          ))}
+            <Button key="skin-settings" plain dimColor hover={{ underline: true }} onPress={() => runCommand($, 'skin', '', () => void refreshSkins($))}>
+              Settings
+            </Button>
+            {!isSkinOff && (
+              <Button
+                key="skin-off"
+                plain
+                dimColor
+                hover={{ underline: true }}
+                onPress={() => {
+                  void update($, skins, s => ({ ...s, current: 'off' }))
+                  runCommand($, 'skin', 'off', () => void refreshSkins($))
+                }}
+              >
+                Turn off
+              </Button>
+            )}
+          </Box>
+          {isSkinOff && <Text dimColor>Skins are off: Claude Code draws the transcript its own way. Pick one to turn them back on.</Text>}
         </Box>,
       )
 
@@ -1664,7 +1789,7 @@ export const register: Register = on => {
       plan: planCard,
       actions: actionsCard,
       context: contextCard,
-      shortcuts: shortcutsCard,
+      skins: skinsCard,
       background: backgroundCard,
       side: sideCard,
       agents: agentsCard,

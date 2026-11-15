@@ -57,7 +57,20 @@ export type SideQuestion = {
   status: 'asking' | 'answered' | 'failed'
   t: number
 }
-export type Shortcut = { label: string; command: string; isExtra: boolean }
+/** The skins mod as the Skins card last read it, through the design tool its skin-designer skill drives. */
+export type SkinsInfo = {
+  /** Whether the skins mod's design tool answered in this session. */
+  isAvailable: boolean
+  /** The skin in use, or `off`. */
+  current?: string
+  builtIn: string[]
+  /** Skins made in its settings or with the skin-designer skill. */
+  made: string[]
+  /** Accent colours (a skin's `user` slot) seen for made skins, by name. */
+  accents: Record<string, string>
+  /** The skin-designer skill's command, when the session lists it. */
+  designer?: string
+}
 /** One step of the desktop app's task list, as Claude last set it. */
 export type PlanStep = {
   content: string
@@ -86,7 +99,7 @@ declare module 'claude-code' {
       expanded: Record<string, boolean>
       approvals: Approval[]
       session: SessionInfo
-      shortcuts: Shortcut[]
+      skins: SkinsInfo
       plan: Plan
       calls: CallStats
       collapsed: Record<string, boolean>

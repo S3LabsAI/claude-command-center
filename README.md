@@ -11,7 +11,7 @@ A Claude Code mod: a live side pane for the session you're in. It shows Claude's
 | **Approvals** | Appears only when a permission prompt is waiting: Approve, Deny, or hand it back to the dialog. Always on top. |
 | **Session** | Running time and cost in the header, with context, 5-hour and 7-day usage bars and a Compact button. Minimized, it shows three small rings instead. |
 | **Side question** | Ask about the session without interrupting it, like `/btw`. Answers come from a fork of the conversation, without tools, and nothing is added to the chat. |
-| **Shortcuts** | One-click buttons that put your commands in the message box. |
+| **Skins** | A button per skin from the [skins mod](https://github.com/hellosverre/claude-skins), built-in and your own, with the one in use highlighted. A press applies it through the design tool the skin-designer skill uses. **✨ Design a skin** opens the skin-designer skill in the message box. **Settings** opens `/skin`, and **Turn off** goes back to Claude Code's own look. Shows only when the skins mod is installed. |
 | **Background work** | Background shells, agents, monitors and workflows, with how long each has run and a Stop button. |
 | **Agents** | A card per subagent. **▸ Details** shows its full task, steps, tokens, latest note and recent tool calls. |
 | **Activity** | Tool calls per minute over the last 20 minutes, the most-used tools and recent failures. Minimized, it shows a thin strip of bars. |

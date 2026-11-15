@@ -62,7 +62,7 @@ test('each subagent gets a card with its task', async ($, on) => {
 
 test('a permission prompt shows as a card and Approve answers it', { timeoutMs: 15000 }, async ($, on) => {
   on('ui.open', async () => ({ value: { isPlaced: true as const } }))
-  on('ui.toast', async () => undefined as never)
+  on('ui.toast', async () => ({ value: undefined }) as never)
   on('classic.PermissionRequest', async () => ({}))
 
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -80,7 +80,7 @@ test('a permission prompt shows as a card and Approve answers it', { timeoutMs: 
 
 test('Deny refuses, and Use dialog hands the prompt back', { timeoutMs: 15000 }, async ($, on) => {
   on('ui.open', async () => ({ value: { isPlaced: true as const } }))
-  on('ui.toast', async () => undefined as never)
+  on('ui.toast', async () => ({ value: undefined }) as never)
   on('classic.PermissionRequest', async () => ({}))
 
   const denied = $.classic.PermissionRequest({ tool_name: 'Write', tool_input: { file_path: '/repo/.env', content: 'x' } })
@@ -131,7 +131,32 @@ const COMMANDS: CommandInfo[] = [
   { name: 'design-taste-frontend', description: '', source: 'user' },
   { name: 'goal-disposition-import:disposition-import', description: '', source: 'plugin' },
   { name: 'research-company', description: '', source: 'user' },
+  { name: 'skins:skin-designer', description: '', source: 'plugin' },
 ]
+
+// The skins mod's design tool, as the Skins card calls it; the calls recorded.
+function skinStubs(on: On) {
+  const state = { current: 'noir', made: ['sunset'] }
+  const calls: Record<string, unknown>[] = []
+  on('tool.call', async (_$, e) => {
+    const { tool, tool_use_id: _id, ...args } = e as { tool: string; tool_use_id?: string } & Record<string, unknown>
+    if (tool !== 'mcp__skins__design') return { result: {} as never }
+    calls.push(args)
+    if (args.action === 'apply') state.current = String(args.name)
+    const text =
+      args.action === 'show'
+        ? JSON.stringify({
+            current: state.current,
+            palette: { user: state.current === 'sunset' ? '#ff8a5b' : '#f5f5f5' },
+            builtIn: ['noir', 'tokyo-night', 'dracula'],
+            made: state.made,
+          })
+        : `applied ${String(args.name)}`
+    return { result: text as never }
+  })
+  on('ui.toast', async () => ({ value: undefined }) as never)
+  return { state, calls }
+}
 
 // What session.start needs beneath the plugin, and the commands it runs recorded.
 function startStubs(on: On) {
@@ -185,22 +210,62 @@ test('the Compact button runs /compact', async ($, on) => {
   await ui.unmount()
 })
 
-test('shortcut buttons fill the prompt with your commands; the extras need room', async ($, on) => {
-  mock.clock(on, { now: Date.now() })
-  const { filled } = startStubs(on)
+test('the Skins card lists every skin and a press applies one through the design tool', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  const { ran, filled } = startStubs(on)
+  const { state, calls } = skinStubs(on)
   await $.session.start({ cwd: '/repo', source: 'startup' } as never)
+  await clock.advance(10)
 
-  const wide = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 80 } })
-  expect(await wide.findAll({ type: 'Button', text: /Market research|Client report|Prompt expert|Onboarding|Design taste|Dispositions|Research company/ })).toHaveLength(7)
-  await wide.press({ key: 'shortcut:anthropic-skills:goal-client-report' })
-  await wide.press({ key: 'shortcut:goal-disposition-import:disposition-import' })
-  expect(filled).toEqual(['/anthropic-skills:goal-client-report ', '/goal-disposition-import:disposition-import '])
-  await wide.unmount()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Button', key: 'fold:skins', text: '▾  Skins' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Noir' })).toBeDefined()
+    expect((await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('skin:'))).toHaveLength(4)
+    expect(await ui.find({ type: 'Button', key: 'skin:sunset', text: /Sunset/ })).toBeDefined()
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'skin:noir' }))).toContain('"variant":"primary"')
+    expect(JSON.stringify(await ui.find({ type: 'Button', key: 'skin:dracula' }))).toContain('#bd93f9')
+    expect(await ui.find({ type: 'Button', key: 'fold:shortcuts' })).toBeUndefined()
+    await ui.unmount()
+  }
 
-  const narrow = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 36 } })
-  expect(await narrow.find({ type: 'Button', text: 'Onboarding' })).toBeDefined()
-  expect(await narrow.find({ type: 'Button', text: 'Design taste' })).toBeUndefined()
-  await narrow.unmount()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'skin:tokyo-night' })
+  await clock.advance(10)
+  expect(state.current).toBe('tokyo-night')
+  expect(calls).toContainEqual({
+    action: 'apply',
+    name: 'tokyo-night',
+    consent: 'The user pressed "Switch the skin to Tokyo Night" in the Command Center pane.',
+  })
+  expect(await ui.find({ type: 'Text', text: 'Tokyo Night' })).toBeDefined()
+  expect(JSON.stringify(await ui.find({ type: 'Button', key: 'skin:tokyo-night' }))).toContain('"variant":"primary"')
+
+  // A made skin's accent is learned once it is in use.
+  await ui.press({ key: 'skin:sunset' })
+  await clock.advance(10)
+  expect(JSON.stringify(await ui.find({ type: 'Button', key: 'skin:sunset' }))).toContain('#ff8a5b')
+
+  // Turn off and Settings go through /skin; Design opens the skin-designer skill.
+  await ui.press({ key: 'skin-off' })
+  await ui.press({ key: 'skin-settings' })
+  await ui.press({ key: 'skin-design' })
+  await clock.advance(10)
+  expect(ran).toContainEqual({ command: 'skin', args: 'off' })
+  expect(ran).toContainEqual({ command: 'skin', args: '' })
+  expect(filled).toEqual(['/skins:skin-designer '])
+  await ui.unmount()
+})
+
+test('no Skins card without the skins mod', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  startStubs(on)
+  on('tool.call', async () => ({ deny: 'No such tool available: mcp__skins__design' }))
+  await $.session.start({ cwd: '/repo', source: 'startup' } as never)
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Button', key: 'fold:skins' })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('the Activity card charts tool calls and lists failures', async ($, on) => {
@@ -227,7 +292,7 @@ test('the Activity card charts tool calls and lists failures', async ($, on) => 
 })
 
 test('each card minimizes to its header and stays minimized next session', async ($, on) => {
-  mock.clock(on, { now: Date.now() })
+  const clock = mock.clock(on, { now: Date.now() })
   const stored = new Map<string, unknown>()
   on('store.get', async (_$, e) => ({ value: stored.get(e.key) }))
   on('store.set', async (_$, e) => {
@@ -235,7 +300,9 @@ test('each card minimizes to its header and stays minimized next session', async
     return { value: undefined }
   })
   startStubs(on)
+  skinStubs(on)
   await $.session.start({ cwd: '/repo', source: 'startup' } as never)
+  await clock.advance(10)
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -248,7 +315,7 @@ test('each card minimizes to its header and stays minimized next session', async
     expect(await ui.find({ type: 'Text', text: 'no reading yet' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'compact' })).toBeUndefined()
     // Other cards are untouched.
-    expect(await ui.find({ type: 'Button', key: 'fold:shortcuts', text: '▾' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'fold:skins', text: '▾' })).toBeDefined()
     await ui.press({ key: 'fold:context' })
     expect(await ui.find({ type: 'Text', text: 'no reading yet' })).toBeDefined()
     await ui.unmount()
@@ -469,7 +536,7 @@ test('an agent card drops down its task, figures, latest note and recent tools',
 })
 
 test('Arrange moves cards up and down, saves the order, and the title toggles the card', async ($, on) => {
-  mock.clock(on, { now: Date.now() })
+  const clock = mock.clock(on, { now: Date.now() })
   const stored = new Map<string, unknown>()
   on('store.get', async (_$, e) => ({ value: stored.get(e.key) }))
   on('store.set', async (_$, e) => {
@@ -477,14 +544,16 @@ test('Arrange moves cards up and down, saves the order, and the title toggles th
     return { value: undefined }
   })
   startStubs(on)
+  skinStubs(on)
   await $.session.start({ cwd: '/repo', source: 'startup' } as never)
+  await clock.advance(10)
 
   const heads = async (ui: { findAll: (q: { type: string; key?: string; text?: RegExp }) => Promise<{ key?: string }[]> }) =>
     (await ui.findAll({ type: 'Button', text: /^[▾▸] {2}/ })).map(b => b.key)
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await heads(ui)).toEqual(['fold:context', 'fold:side', 'fold:shortcuts', 'fold:background', 'fold:agents', 'fold:activity'])
+    expect(await heads(ui)).toEqual(['fold:context', 'fold:side', 'fold:skins', 'fold:background', 'fold:agents', 'fold:activity'])
     expect(await ui.find({ type: 'Button', key: 'up:activity' })).toBeUndefined()
     await ui.unmount()
   }
@@ -495,8 +564,8 @@ test('Arrange moves cards up and down, saves the order, and the title toggles th
   for (let i = 0; i < 5; i++) await ui.press({ key: 'up:activity' })
   expect(await ui.find({ type: 'Button', key: 'up:activity' })).toBeUndefined()
   await ui.press({ key: 'down:context' })
-  expect(await heads(ui)).toEqual(['fold:activity', 'fold:side', 'fold:context', 'fold:shortcuts', 'fold:background', 'fold:agents'])
-  expect(stored.get('order')).toEqual(['plan', 'actions', 'activity', 'side', 'context', 'shortcuts', 'background', 'agents'])
+  expect(await heads(ui)).toEqual(['fold:activity', 'fold:side', 'fold:context', 'fold:skins', 'fold:background', 'fold:agents'])
+  expect(stored.get('order')).toEqual(['plan', 'actions', 'activity', 'side', 'context', 'skins', 'background', 'agents'])
   await ui.press({ key: 'arrange' })
   expect(await ui.find({ type: 'Button', key: 'up:context' })).toBeUndefined()
 
@@ -727,4 +796,21 @@ test('the Plan card follows the task list Claude sets, advances it, and checks i
   expect(await fresh.find({ type: 'Text', text: '0/1' })).toBeDefined()
   expect(await fresh.find({ type: 'Text', text: 'Find the research' })).toBeUndefined()
   await fresh.unmount()
+})
+
+test('the Skins card takes the Shortcuts card place and minimized state from a saved layout', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  const saved: Record<string, unknown> = { order: ['shortcuts', 'context'], collapsed: { shortcuts: true } }
+  on('store.get', async (_$, e) => ({ value: saved[e.key] }))
+  on('store.set', async () => ({ value: undefined }))
+  startStubs(on)
+  skinStubs(on)
+  await $.session.start({ cwd: '/repo', source: 'startup' } as never)
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const keys = (await ui.findAll({ type: 'Button', text: /^[▾▸] {2}/ })).map(b => b.key)
+  expect(keys.slice(0, 2)).toEqual(['fold:skins', 'fold:context'])
+  expect(await ui.find({ type: 'Button', key: 'fold:skins', text: '▸  Skins' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'skin:noir' })).toBeUndefined()
+  await ui.unmount()
 })
